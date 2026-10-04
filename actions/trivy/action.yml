@@ -124,11 +124,11 @@ runs:
       shell: bash
       env:
         DOCKERFILE: ${{ inputs.dockerfile }}
-        DOCKER_CONTEXT: ${{ inputs.docker-context }}
+        BUILD_CONTEXT: ${{ inputs.docker-context }}
       run: |
         set -euo pipefail
         image="nibiru-ci-scan:${GITHUB_SHA:0:12}"
-        docker build --pull --file "${DOCKERFILE}" --tag "${image}" "${DOCKER_CONTEXT}"
+        docker build --pull --file "${DOCKERFILE}" --tag "${image}" "${BUILD_CONTEXT}"
         echo "image=${image}" >> "${GITHUB_OUTPUT}"
 
     - name: Scanner
