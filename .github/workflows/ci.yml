@@ -1,0 +1,118 @@
+name: ci
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: "Stack du projet : php | node | java | go | python"
+        type: string
+        required: true
+      dockerfile:
+        description: "Chemin du Dockerfile relatif a la racine. Vide = pas de scan d'image."
+        type: string
+        default: ""
+      docker-context:
+        description: "Contexte de build Docker."
+        type: string
+        default: "."
+      scan-path:
+        description: "Repertoire analyse par la SCA dependances (monorepo)."
+        type: string
+        default: "."
+      fail-on:
+        description: "Seuil bloquant SCA : none | low | medium | high | critical"
+        type: string
+        default: "none"
+      ignore-unfixed:
+        description: "Ignorer les vulnerabilites sans correctif disponible."
+        type: boolean
+        default: true
+      sbom:
+        description: "Produire un SBOM CycloneDX (dependances et image)."
+        type: boolean
+        default: false
+      secrets-enforce:
+        description: "Bloquer si un secret est detecte."
+        type: boolean
+        default: true
+      runs-on:
+        description: "Label du runner."
+        type: string
+        default: "ubuntu-24.04"
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    name: inputs
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 2
+    steps:
+      - name: Valider la stack
+        env:
+          STACK: ${{ inputs.stack }}
+        run: |
+          set -euo pipefail
+          case "${STACK}" in
+            php|node|java|go|python) echo "Stack : ${STACK}" ;;
+            *) echo "::error title=ci::stack invalide : '${STACK}' (attendu : php | node | java | go | python)"; exit 1 ;;
+          esac
+
+  secrets:
+    name: secrets
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gitleaks
+        uses: Nibiru-ci/ci-templates/actions/gitleaks@v1
+        with:
+          enforce: ${{ inputs.secrets-enforce }}
+
+  sca-dependencies:
+    name: sca-dependencies
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Trivy fs
+        uses: Nibiru-ci/ci-templates/actions/trivy@v1
+        with:
+          scan-type: fs
+          scan-path: ${{ inputs.scan-path }}
+          fail-on: ${{ inputs.fail-on }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          sbom: ${{ inputs.sbom }}
+          artifact-name: sca-dependencies
+
+  sca-image:
+    name: sca-image
+    if: inputs.dockerfile != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Trivy image
+        uses: Nibiru-ci/ci-templates/actions/trivy@v1
+        with:
+          scan-type: image
+          dockerfile: ${{ inputs.dockerfile }}
+          docker-context: ${{ inputs.docker-context }}
+          fail-on: ${{ inputs.fail-on }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          sbom: ${{ inputs.sbom }}
+          artifact-name: sca-image

@@ -1,0 +1,6 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "Nibiru-ci/*": ref-pin
+        "*": hash-pin

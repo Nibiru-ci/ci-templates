@@ -1,0 +1,15 @@
+# Configuration Trivy par defaut - Nibiru-ci
+# Utilisee uniquement si le projet ne fournit pas son propre trivy.yaml a la racine.
+# Les options passees par l'action (scanners, format, ignore-unfixed) ont priorite sur ce fichier.
+
+timeout: 15m
+quiet: false
+
+db:
+  no-progress: true
+
+scan:
+  skip-dirs:
+    - "**/node_modules/**/test"
+    - "**/node_modules/**/tests"
+    - "**/.git"

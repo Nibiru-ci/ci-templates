@@ -1,0 +1,290 @@
+name: "Nibiru-ci / trivy"
+description: "SCA avec la CLI Trivy (version epinglee, checksum verifie) : dependances (fs) ou image Docker construite localement (image)."
+
+inputs:
+  scan-type:
+    description: "fs = dependances declarees dans les lockfiles ; image = build local du Dockerfile puis scan (vulnerabilites OS et librairies, secrets embarques)."
+    required: true
+  scan-path:
+    description: "Repertoire a analyser en mode fs (relatif a la racine du depot)."
+    required: false
+    default: "."
+  dockerfile:
+    description: "Chemin du Dockerfile en mode image."
+    required: false
+    default: "Dockerfile"
+  docker-context:
+    description: "Contexte de build Docker en mode image."
+    required: false
+    default: "."
+  fail-on:
+    description: "Seuil bloquant : none | low | medium | high | critical."
+    required: false
+    default: "none"
+  ignore-unfixed:
+    description: "Ignorer les vulnerabilites sans version corrigee (true | false)."
+    required: false
+    default: "true"
+  sbom:
+    description: "Produire un SBOM CycloneDX en artefact (true | false)."
+    required: false
+    default: "false"
+  config-path:
+    description: "Config Trivy. Vide = trivy.yaml du projet s'il existe, sinon config par defaut Nibiru-ci."
+    required: false
+    default: ""
+  artifact-name:
+    description: "Nom de l'artefact des rapports. Vide = trivy-<scan-type>."
+    required: false
+    default: ""
+
+outputs:
+  findings:
+    description: "Nombre de findings au-dessus du seuil fail-on."
+    value: ${{ steps.report.outputs.findings }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Valider les parametres
+      id: params
+      shell: bash
+      env:
+        SCAN_TYPE: ${{ inputs.scan-type }}
+        SCAN_PATH: ${{ inputs.scan-path }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        DOCKER_CONTEXT: ${{ inputs.docker-context }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        SBOM: ${{ inputs.sbom }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+        err() { echo "::error title=trivy::$*"; exit 1; }
+
+        case "${SCAN_TYPE}" in fs|image) ;; *) err "scan-type invalide : '${SCAN_TYPE}' (attendu : fs | image)";; esac
+        case "${FAIL_ON}" in
+          none)     gate='[]' ;;
+          critical) gate='["CRITICAL"]' ;;
+          high)     gate='["CRITICAL","HIGH"]' ;;
+          medium)   gate='["CRITICAL","HIGH","MEDIUM"]' ;;
+          low)      gate='["CRITICAL","HIGH","MEDIUM","LOW"]' ;;
+          *) err "fail-on invalide : '${FAIL_ON}' (attendu : none | low | medium | high | critical)";;
+        esac
+        for flag in IGNORE_UNFIXED SBOM; do
+          case "${!flag}" in true|false) ;; *) err "${flag} doit valoir true ou false (recu : '${!flag}')";; esac
+        done
+        for p in "${SCAN_PATH}" "${DOCKERFILE}" "${DOCKER_CONTEXT}"; do
+          [[ "${p}" == /* || "${p}" == *..* ]] && err "Chemin refuse (absolu ou remontant) : '${p}'"
+        done
+        if [[ "${SCAN_TYPE}" == "fs" ]]; then
+          [[ -d "${SCAN_PATH}" ]] || err "scan-path introuvable : '${SCAN_PATH}'"
+        else
+          [[ -f "${DOCKERFILE}" ]] || err "Dockerfile introuvable : '${DOCKERFILE}'"
+          [[ -d "${DOCKER_CONTEXT}" ]] || err "docker-context introuvable : '${DOCKER_CONTEXT}'"
+        fi
+
+        {
+          echo "gate=${gate}"
+          echo "artifact=${ARTIFACT_NAME:-trivy-${SCAN_TYPE}}"
+          echo "date=$(date -u +%Y-%m-%d)"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Installer Trivy
+      id: install
+      shell: bash
+      env:
+        TRIVY_VERSION: "0.75.0"
+        TRIVY_SHA256: "c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f"
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS}" != "Linux" || "${RUNNER_ARCH}" != "X64" ]]; then
+          echo "::error title=trivy::Runner non supporte (${RUNNER_OS}/${RUNNER_ARCH}). Linux X64 requis."
+          exit 1
+        fi
+        archive="${RUNNER_TEMP}/trivy.tar.gz"
+        curl -sSfL --retry 3 -o "${archive}" \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        echo "${TRIVY_SHA256}  ${archive}" | sha256sum --check --strict -
+        mkdir -p "${RUNNER_TEMP}/trivy-bin"
+        tar -xzf "${archive}" -C "${RUNNER_TEMP}/trivy-bin" trivy
+        echo "bin=${RUNNER_TEMP}/trivy-bin/trivy" >> "${GITHUB_OUTPUT}"
+
+    - name: Restaurer la base de vulnerabilites
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/trivy/db
+        key: trivy-db-${{ runner.os }}-${{ steps.params.outputs.date }}
+        restore-keys: |
+          trivy-db-${{ runner.os }}-
+
+    - name: Construire l'image
+      id: build
+      if: inputs.scan-type == 'image'
+      shell: bash
+      env:
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        DOCKER_CONTEXT: ${{ inputs.docker-context }}
+      run: |
+        set -euo pipefail
+        image="nibiru-ci-scan:${GITHUB_SHA:0:12}"
+        docker build --pull --file "${DOCKERFILE}" --tag "${image}" "${DOCKER_CONTEXT}"
+        echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+    - name: Scanner
+      id: scan
+      shell: bash
+      env:
+        SCAN_TYPE: ${{ inputs.scan-type }}
+        SCAN_PATH: ${{ inputs.scan-path }}
+        IMAGE: ${{ steps.build.outputs.image }}
+        IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        INPUT_CONFIG: ${{ inputs.config-path }}
+        DEFAULT_CONFIG: ${{ github.action_path }}/trivy.yaml
+        TRIVY_BIN: ${{ steps.install.outputs.bin }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/trivy-${SCAN_TYPE}"
+        mkdir -p "${out}"
+
+        if [[ -n "${INPUT_CONFIG}" ]]; then
+          [[ -f "${INPUT_CONFIG}" ]] || { echo "::error title=trivy::config-path introuvable : ${INPUT_CONFIG}"; exit 1; }
+          config="${INPUT_CONFIG}"; config_label="${INPUT_CONFIG}"
+        elif [[ -f "trivy.yaml" ]]; then
+          config="trivy.yaml"; config_label="trivy.yaml (projet)"
+        else
+          config="${DEFAULT_CONFIG}"; config_label="defaut Nibiru-ci"
+        fi
+
+        ignorefile=""
+        ignore_label="aucun"
+        for candidate in .trivyignore.yaml .trivyignore; do
+          if [[ -f "${candidate}" ]]; then
+            ignorefile="${candidate}"; ignore_label="${candidate}"
+            break
+          fi
+        done
+
+        common=(--config "${config}" --ignorefile "${ignorefile}" --format json --output "${out}/report.json" --exit-code 0 --list-all-pkgs)
+        [[ "${IGNORE_UNFIXED}" == "true" ]] && common+=(--ignore-unfixed)
+
+        if [[ "${SCAN_TYPE}" == "fs" ]]; then
+          "${TRIVY_BIN}" fs "${common[@]}" --scanners vuln "${SCAN_PATH}"
+          target="${SCAN_PATH}"
+        else
+          "${TRIVY_BIN}" image "${common[@]}" --scanners vuln,secret --image-src docker "${IMAGE}"
+          target="${IMAGE}"
+        fi
+
+        "${TRIVY_BIN}" convert --format sarif --output "${out}/report.sarif" "${out}/report.json"
+
+        {
+          echo "dir=${out}"
+          echo "target=${target}"
+          echo "config=${config_label}"
+          echo "ignore=${ignore_label}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Generer le SBOM
+      if: inputs.sbom == 'true'
+      shell: bash
+      env:
+        OUT: ${{ steps.scan.outputs.dir }}
+        TRIVY_BIN: ${{ steps.install.outputs.bin }}
+      run: |
+        set -euo pipefail
+        "${TRIVY_BIN}" convert --format cyclonedx --output "${OUT}/sbom.cdx.json" "${OUT}/report.json"
+
+    - name: Rapport
+      id: report
+      shell: bash
+      env:
+        SCAN_TYPE: ${{ inputs.scan-type }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        GATE: ${{ steps.params.outputs.gate }}
+        IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        OUT: ${{ steps.scan.outputs.dir }}
+        TARGET: ${{ steps.scan.outputs.target }}
+        CONFIG_LABEL: ${{ steps.scan.outputs.config }}
+        IGNORE_LABEL: ${{ steps.scan.outputs.ignore }}
+      run: |
+        set -euo pipefail
+        json="${OUT}/report.json"
+
+        # Normalisation : une ligne par finding (vulnerabilite ou secret embarque).
+        jq '
+          def rank: {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"UNKNOWN":4}[.] // 5;
+          [ .Results[]? | .Target as $t |
+            ( .Vulnerabilities[]? | {
+                kind: "vuln", severity: .Severity, id: .VulnerabilityID, target: $t,
+                pkg: .PkgName, installed: .InstalledVersion, fixed: (.FixedVersion // ""),
+                title: (.Title // "") } ),
+            ( .Secrets[]? | {
+                kind: "secret", severity: .Severity, id: .RuleID, target: $t,
+                pkg: "", installed: "", fixed: "", title: (.Title // "") } )
+          ] | sort_by((.severity | rank), .id)
+        ' "${json}" > "${OUT}/findings.json"
+
+        findings="$(jq --argjson gate "${GATE}" '[.[] | select(.severity as $s | $gate | index($s))] | length' "${OUT}/findings.json")"
+        echo "findings=${findings}" >> "${GITHUB_OUTPUT}"
+
+        count() { jq --arg s "$1" '[.[] | select(.severity == $s)] | length' "${OUT}/findings.json"; }
+        eosl="$(jq -r 'if .Metadata.OS.EOSL == true then "\(.Metadata.OS.Family) \(.Metadata.OS.Name)" else "" end' "${json}")"
+
+        if [[ "${SCAN_TYPE}" == "fs" ]]; then title="SCA dependances (Trivy fs)"; else title="SCA image (Trivy image)"; fi
+        {
+          echo "## ${title}"
+          echo
+          echo "| Cible | Seuil bloquant | Sans correctif | Config | Exceptions |"
+          echo "|---|---|---|---|---|"
+          echo "| \`${TARGET}\` | ${FAIL_ON} | $([[ "${IGNORE_UNFIXED}" == "true" ]] && echo "ignores" || echo "inclus") | ${CONFIG_LABEL} | ${IGNORE_LABEL} |"
+          echo
+          echo "| CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN | **Au-dessus du seuil** |"
+          echo "|---|---|---|---|---|---|"
+          echo "| $(count CRITICAL) | $(count HIGH) | $(count MEDIUM) | $(count LOW) | $(count UNKNOWN) | **${findings}** |"
+          if [[ -n "${eosl}" ]]; then
+            echo
+            echo "> **Image de base en fin de support : ${eosl}.** Plus aucun correctif de securite ne sera publie, changer d'image de base."
+          fi
+          total="$(jq 'length' "${OUT}/findings.json")"
+          if [[ "${total}" -gt 0 ]]; then
+            echo
+            echo "| Severite | Identifiant | Composant | Installe | Corrige en | Fichier |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '
+              def cell: tostring | gsub("\\|";"\\|") | gsub("\n";" ");
+              .[:100][]
+              | if .kind == "secret" then
+                  "| \(.severity) | secret : \(.id | cell) | - | - | - | `\(.target | cell)` |"
+                else
+                  "| \(.severity) | \(.id | cell) | \(.pkg | cell) | \(.installed | cell) | \(if .fixed == "" then "-" else (.fixed | cell) end) | `\(.target | cell)` |"
+                end
+            ' "${OUT}/findings.json"
+            [[ "${total}" -gt 100 ]] && echo && echo "_${total} findings au total, 100 premiers affiches. Rapport complet en artefact._"
+          fi
+          echo
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Publier les rapports
+      if: always() && steps.scan.outputs.dir != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.params.outputs.artifact }}
+        path: |
+          ${{ steps.scan.outputs.dir }}/report.json
+          ${{ steps.scan.outputs.dir }}/report.sarif
+          ${{ steps.scan.outputs.dir }}/sbom.cdx.json
+        retention-days: 30
+        if-no-files-found: warn
+
+    - name: Appliquer la politique
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        FINDINGS: ${{ steps.report.outputs.findings }}
+      run: |
+        set -euo pipefail
+        if [[ "${FINDINGS}" -gt 0 ]]; then
+          echo "::error title=trivy::${FINDINGS} finding(s) de severite >= ${FAIL_ON}. Voir le resume du job."
+          exit 1
+        fi

@@ -1,0 +1,25 @@
+# Configuration Gitleaks par defaut - Nibiru-ci
+# Utilisee uniquement si le projet ne fournit pas son propre .gitleaks.toml a la racine.
+# Un .gitleaks.toml projet doit garder [extend] useDefault = true pour conserver les regles officielles.
+
+title = "Nibiru-ci - configuration Gitleaks par defaut"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Dependances tierces, lockfiles et artefacts generes"
+paths = [
+  '''(^|/)vendor/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)composer\.lock$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)yarn\.lock$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)go\.sum$''',
+  '''(^|/)poetry\.lock$''',
+  '''(^|/)Pipfile\.lock$''',
+  '''(^|/)gradle/wrapper/gradle-wrapper\.jar$''',
+  '''\.min\.(js|css)$''',
+  '''\.(png|jpe?g|gif|ico|svg|woff2?|ttf|eot|pdf)$''',
+]
