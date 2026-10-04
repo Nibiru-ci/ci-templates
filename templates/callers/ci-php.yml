@@ -17,5 +17,6 @@ jobs:
     uses: Nibiru-ci/ci-templates/.github/workflows/ci.yml@v1
     with:
       stack: php
+      lint-enforce: false
       dockerfile: ""
       fail-on: none

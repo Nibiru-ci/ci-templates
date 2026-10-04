@@ -1,0 +1,293 @@
+name: "Nibiru-ci / lint"
+description: "Lint et controle de format par stack (php, node, java, kotlin, go, python). Outil par defaut selon la stack, config du projet prioritaire, commande personnalisable."
+
+inputs:
+  stack:
+    description: "php | node | java | kotlin | go | python"
+    required: true
+  lint-path:
+    description: "Repertoire du projet a analyser, relatif a la racine du depot (monorepo)."
+    required: false
+    default: "."
+  runtime-version:
+    description: "Version du runtime. Vide = defaut de la stack (node 24, java 21, go du go.mod, php du runner)."
+    required: false
+    default: ""
+  lint-command:
+    description: "Commande de lint du projet. Si renseignee, elle remplace entierement les controles par defaut : le projet gere lui-meme l'installation de ses dependances."
+    required: false
+    default: ""
+  enforce:
+    description: "Faire echouer le job si un controle echoue ou n'est pas configure (true | false)."
+    required: false
+    default: "true"
+  composer-auth:
+    description: "Contenu JSON de COMPOSER_AUTH pour les depots Composer prives (Nova, Packagist prive)."
+    required: false
+    default: ""
+
+outputs:
+  failures:
+    description: "Nombre de controles en echec ou non configures."
+    value: ${{ steps.run.outputs.failures }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Valider les parametres
+      shell: bash
+      env:
+        STACK: ${{ inputs.stack }}
+        LINT_PATH: ${{ inputs.lint-path }}
+        ENFORCE: ${{ inputs.enforce }}
+      run: |
+        set -euo pipefail
+        err() { echo "::error title=lint::$*"; exit 1; }
+        case "${STACK}" in php|node|java|kotlin|go|python) ;; *) err "stack invalide : '${STACK}' (attendu : php | node | java | kotlin | go | python)";; esac
+        case "${ENFORCE}" in true|false) ;; *) err "enforce doit valoir true ou false (recu : '${ENFORCE}')";; esac
+        if [[ "${LINT_PATH}" == /* || "${LINT_PATH}" == *..* ]]; then err "lint-path refuse (absolu ou remontant) : '${LINT_PATH}'"; fi
+        [[ -d "${LINT_PATH}" ]] || err "lint-path introuvable : '${LINT_PATH}'"
+
+    - name: Installer Node
+      if: inputs.stack == 'node'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ inputs.runtime-version || '24' }}
+        package-manager-cache: false
+
+    - name: Installer Go
+      if: inputs.stack == 'go'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ inputs.runtime-version }}
+        go-version-file: ${{ inputs.lint-path }}/go.mod
+        cache: false
+
+    - name: Installer Java
+      if: inputs.stack == 'java' || inputs.stack == 'kotlin'
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.runtime-version || '21' }}
+
+    - name: Installer Python
+      if: inputs.stack == 'python' && inputs.lint-command != ''
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.runtime-version || '3.13' }}
+
+    - name: Installer l'outil de lint
+      id: tool
+      if: inputs.lint-command == '' && (inputs.stack == 'python' || inputs.stack == 'go')
+      shell: bash
+      env:
+        STACK: ${{ inputs.stack }}
+        RUFF_VERSION: "0.16.10"
+        RUFF_SHA256: "9567ff1201e2fb3da31ff04c35587d768c66d6cb42dfa84de474e2bfe360b608"
+        GOLANGCI_VERSION: "2.14.0"
+        GOLANGCI_SHA256: "ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab"
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS}" != "Linux" || "${RUNNER_ARCH}" != "X64" ]]; then
+          echo "::error title=lint::Runner non supporte (${RUNNER_OS}/${RUNNER_ARCH}). Linux X64 requis."
+          exit 1
+        fi
+        archive="${RUNNER_TEMP}/lint-tool.tar.gz"
+        dest="${RUNNER_TEMP}/lint-tool"
+        mkdir -p "${dest}"
+        if [[ "${STACK}" == "python" ]]; then
+          curl -sSfL --retry 3 -o "${archive}" \
+            "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RUFF_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar -xzf "${archive}" -C "${dest}" --strip-components=1
+          echo "bin=${dest}/ruff" >> "${GITHUB_OUTPUT}"
+        else
+          curl -sSfL --retry 3 -o "${archive}" \
+            "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_VERSION}/golangci-lint-${GOLANGCI_VERSION}-linux-amd64.tar.gz"
+          echo "${GOLANGCI_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar -xzf "${archive}" -C "${dest}" --strip-components=1
+          echo "bin=${dest}/golangci-lint" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Lint
+      id: run
+      shell: bash
+      env:
+        STACK: ${{ inputs.stack }}
+        LINT_PATH: ${{ inputs.lint-path }}
+        RUNTIME_VERSION: ${{ inputs.runtime-version }}
+        LINT_COMMAND: ${{ inputs.lint-command }}
+        ENFORCE: ${{ inputs.enforce }}
+        COMPOSER_AUTH: ${{ inputs.composer-auth }}
+        TOOL_BIN: ${{ steps.tool.outputs.bin }}
+        DEFAULTS_DIR: ${{ github.action_path }}/defaults
+      run: |
+        set -uo pipefail
+        [[ -n "${COMPOSER_AUTH}" ]] || unset COMPOSER_AUTH
+        cd "${LINT_PATH}" || exit 1
+
+        log_dir="${RUNNER_TEMP}/lint-logs"
+        mkdir -p "${log_dir}"
+        labels=(); commands=(); statuses=(); logs=()
+
+        record() { labels+=("$1"); commands+=("$2"); statuses+=("$3"); logs+=("$4"); }
+
+        run_check() {
+          local label="$1" cmd="$2" shown="${3:-$2}" logf rc
+          logf="${log_dir}/${#labels[@]}.log"
+          echo "::group::${label}"
+          echo "\$ ${cmd}"
+          bash -euo pipefail -c "${cmd}" 2>&1 | tee "${logf}"
+          rc=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          if [[ ${rc} -eq 0 ]]; then record "${label}" "${shown}" "ok" ""; return 0; fi
+          record "${label}" "${shown}" "echec" "${logf}"
+          return 1
+        }
+
+        not_configured() {
+          local logf="${log_dir}/${#labels[@]}.log"
+          printf '%s\n' "$3" > "${logf}"
+          echo "::notice title=lint::$1 : non configure - $3"
+          record "$1" "$2" "non configure" "${logf}"
+        }
+
+        if [[ -n "${LINT_COMMAND}" ]]; then
+          run_check "lint-command" "${LINT_COMMAND}" || true
+        else
+          case "${STACK}" in
+            php)
+              if [[ -n "${RUNTIME_VERSION}" ]]; then
+                installed="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"
+                if [[ "${installed}" != "${RUNTIME_VERSION}"* ]]; then
+                  not_configured "runtime php" "php ${RUNTIME_VERSION}" "PHP ${RUNTIME_VERSION} demande, le runner fournit ${installed}. Autoriser et epingler setup-php dans la politique Actions, ou ajuster runtime-version."
+                fi
+              fi
+              run_check "syntaxe php" "fail=0; while IFS= read -r -d '' f; do php -n -d display_errors=stderr -l \"\${f}\" > /dev/null || fail=1; done < <(find . -type f -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' -print0); exit \"\${fail}\"" "php -l sur chaque fichier .php (hors vendor)" || true
+              if [[ ! -f composer.json ]]; then
+                not_configured "pint" "vendor/bin/pint --test" "composer.json absent."
+              elif run_check "composer install" "composer install --no-interaction --no-progress --prefer-dist --no-scripts --ignore-platform-reqs"; then
+                if [[ -x vendor/bin/pint ]]; then
+                  run_check "pint" "vendor/bin/pint --test" || true
+                else
+                  not_configured "pint" "vendor/bin/pint --test" "laravel/pint absent de require-dev. Declarer le formateur dans composer.json, ou fournir lint-command."
+                fi
+              fi
+              ;;
+            node)
+              if [[ ! -f package.json ]]; then
+                not_configured "lint" "npm run lint" "package.json absent."
+              elif [[ ! -f package-lock.json ]]; then
+                not_configured "lint" "npm run lint" "package-lock.json absent. Le defaut gere npm uniquement : pour pnpm ou yarn, fournir lint-command."
+              elif run_check "npm ci" "npm ci --ignore-scripts --no-audit --no-fund"; then
+                if jq -e '.scripts.lint' package.json > /dev/null; then
+                  run_check "lint" "npm run lint" || true
+                else
+                  not_configured "lint" "npm run lint" "script npm 'lint' absent de package.json."
+                fi
+                if jq -e '.scripts["format:check"]' package.json > /dev/null; then
+                  run_check "format" "npm run format:check" || true
+                fi
+                if [[ -f tsconfig.json && -x node_modules/.bin/tsc ]]; then
+                  run_check "typecheck" "npx --no-install tsc --noEmit" || true
+                fi
+              fi
+              ;;
+            python)
+              cfg=()
+              cfg_label="defaut Nibiru-ci"
+              if [[ -f ruff.toml || -f .ruff.toml ]] || { [[ -f pyproject.toml ]] && grep -qE '^\[tool\.ruff' pyproject.toml; }; then
+                cfg_label="projet"
+              else
+                cfg=(--config "${DEFAULTS_DIR}/ruff.toml")
+              fi
+              echo "Config ruff : ${cfg_label}"
+              ruff_cmd="\"${TOOL_BIN}\""
+              cfg_str="${cfg[*]:-}"
+              run_check "ruff check" "${ruff_cmd} check ${cfg_str} ." "ruff check . (config ${cfg_label})" || true
+              run_check "ruff format" "${ruff_cmd} format --check ${cfg_str} ." "ruff format --check . (config ${cfg_label})" || true
+              ;;
+            go)
+              if [[ ! -f go.mod ]]; then
+                not_configured "golangci-lint" "golangci-lint run ./..." "go.mod absent."
+              else
+                cfg_str=""
+                cfg_label="defaut Nibiru-ci"
+                project_cfg=""
+                for c in .golangci.yml .golangci.yaml .golangci.toml .golangci.json; do
+                  [[ -f "${c}" ]] && { project_cfg="${c}"; break; }
+                done
+                if [[ -n "${project_cfg}" ]]; then cfg_label="${project_cfg}"; else cfg_str="--config ${DEFAULTS_DIR}/golangci.yml"; fi
+                echo "Config golangci-lint : ${cfg_label}"
+                # shellcheck disable=SC2016
+                run_check "gofmt" 'files="$(gofmt -l . | grep -v "^vendor/" || true)"; if [[ -n "${files}" ]]; then echo "Fichiers non formates :"; echo "${files}"; exit 1; fi' "gofmt -l ." || true
+                run_check "golangci-lint" "\"${TOOL_BIN}\" run ${cfg_str} ./..." "golangci-lint run ./... (config ${cfg_label})" || true
+              fi
+              ;;
+            java|kotlin)
+              wrapper=""
+              if [[ -x ./gradlew ]]; then
+                wrapper="./gradlew --no-daemon --console=plain spotlessCheck"
+              elif [[ -x ./mvnw ]]; then
+                wrapper="./mvnw -B -ntp spotless:check"
+              elif [[ -f pom.xml ]]; then
+                wrapper="mvn -B -ntp spotless:check"
+              elif [[ -f build.gradle || -f build.gradle.kts ]]; then
+                wrapper="gradle --no-daemon --console=plain spotlessCheck"
+              fi
+              if [[ -z "${wrapper}" ]]; then
+                not_configured "spotless" "spotlessCheck" "Aucun build Maven ou Gradle trouve."
+              elif ! grep -rqsi spotless pom.xml build.gradle build.gradle.kts settings.gradle settings.gradle.kts gradle/libs.versions.toml; then
+                not_configured "spotless" "${wrapper}" "Plugin Spotless absent du build. Le declarer (google-java-format, ktlint...) ou fournir lint-command (checkstyle, detekt...)."
+              else
+                run_check "spotless" "${wrapper}" || true
+              fi
+              ;;
+          esac
+        fi
+
+        failures=0
+        for s in "${statuses[@]}"; do [[ "${s}" != "ok" ]] && failures=$((failures + 1)); done
+        echo "failures=${failures}" >> "${GITHUB_OUTPUT}"
+
+        if [[ "${ENFORCE}" == "true" ]]; then level="error"; mode="bloquant"; else level="warning"; mode="rapport (non bloquant)"; fi
+        for i in "${!labels[@]}"; do
+          [[ "${statuses[$i]}" == "ok" ]] && continue
+          echo "::${level} title=lint ${STACK}::${labels[$i]} : ${statuses[$i]}"
+        done
+
+        {
+          echo "## Lint (${STACK})"
+          echo
+          echo "Mode : ${mode} - repertoire : \`${LINT_PATH}\`"
+          echo
+          echo "| Controle | Commande | Resultat |"
+          echo "|---|---|---|"
+          for i in "${!labels[@]}"; do
+            cmd="${commands[$i]//|/\\|}"
+            cmd="${cmd//$'\n'/ }"
+            if [[ "${statuses[$i]}" == "ok" ]]; then res="ok"; else res="**${statuses[$i]}**"; fi
+            echo "| ${labels[$i]} | \`${cmd:0:120}\` | ${res} |"
+          done
+          for i in "${!labels[@]}"; do
+            [[ -n "${logs[$i]}" && -s "${logs[$i]}" ]] || continue
+            echo
+            echo "<details><summary>${labels[$i]} : ${statuses[$i]}</summary>"
+            echo
+            echo '~~~~'
+            tail -n 40 "${logs[$i]}"
+            echo '~~~~'
+            echo
+            echo "</details>"
+          done
+          echo
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        if [[ ${#labels[@]} -eq 0 ]]; then
+          echo "::error title=lint::Aucun controle execute."
+          exit 1
+        fi
+        if [[ ${failures} -gt 0 && "${ENFORCE}" == "true" ]]; then
+          echo "::error title=lint::${failures} controle(s) en echec ou non configure(s). Voir le resume du job."
+          exit 1
+        fi

@@ -4,3 +4,5 @@ rules:
       policies:
         "Nibiru-ci/*": ref-pin
         "*": hash-pin
+  self-repository:
+    disable: true

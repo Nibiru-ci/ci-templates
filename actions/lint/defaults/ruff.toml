@@ -1,0 +1,7 @@
+# Configuration Ruff par defaut - Nibiru-ci
+# Utilisee uniquement si le projet n'a ni ruff.toml, ni .ruff.toml, ni section [tool.ruff] dans pyproject.toml.
+
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I"]

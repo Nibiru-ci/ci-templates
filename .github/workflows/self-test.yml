@@ -1,0 +1,57 @@
+name: self-test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: python-ok, stack: python, path: tests/fixtures/python/ok, expect: success }
+          - { name: python-ko, stack: python, path: tests/fixtures/python/ko, expect: failure }
+          - { name: go-ok, stack: go, path: tests/fixtures/go/ok, expect: success }
+          - { name: go-ko, stack: go, path: tests/fixtures/go/ko, expect: failure }
+          - { name: node-ok, stack: node, path: tests/fixtures/node/ok, expect: success }
+          - { name: node-ko, stack: node, path: tests/fixtures/node/ko, expect: failure }
+          - { name: php-ok, stack: php, path: tests/fixtures/php/ok, expect: success }
+          - { name: php-ko, stack: php, path: tests/fixtures/php/ko, expect: failure }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint
+        id: lint
+        continue-on-error: true
+        uses: ./actions/lint
+        with:
+          stack: ${{ matrix.stack }}
+          lint-path: ${{ matrix.path }}
+          enforce: "true"
+
+      - name: Verifier le resultat attendu
+        env:
+          EXPECT: ${{ matrix.expect }}
+          OUTCOME: ${{ steps.lint.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${OUTCOME}" != "${EXPECT}" ]]; then
+            echo "::error title=self-test::${EXPECT} attendu, ${OUTCOME} obtenu. Un controle de lint ne detecte plus (ou detecte a tort) la fixture."
+            exit 1
+          fi
+          echo "OK : ${OUTCOME} comme attendu."

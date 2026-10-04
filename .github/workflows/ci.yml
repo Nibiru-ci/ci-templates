@@ -4,9 +4,25 @@ on:
   workflow_call:
     inputs:
       stack:
-        description: "Stack du projet : php | node | java | go | python"
+        description: "Stack du projet : php | node | java | kotlin | go | python"
         type: string
         required: true
+      runtime-version:
+        description: "Version du runtime pour le lint. Vide = defaut de la stack (node 24, java 21, go du go.mod, php du runner)."
+        type: string
+        default: ""
+      lint-path:
+        description: "Repertoire du projet pour le lint (monorepo)."
+        type: string
+        default: "."
+      lint-command:
+        description: "Commande de lint du projet. Remplace entierement les controles par defaut."
+        type: string
+        default: ""
+      lint-enforce:
+        description: "Bloquer si un controle de lint echoue ou n'est pas configure."
+        type: boolean
+        default: false
       dockerfile:
         description: "Chemin du Dockerfile relatif a la racine. Vide = pas de scan d'image."
         type: string
@@ -40,6 +56,11 @@ on:
         type: string
         default: "ubuntu-24.04"
 
+    secrets:
+      COMPOSER_AUTH:
+        description: "JSON COMPOSER_AUTH pour les depots Composer prives (Nova, Packagist prive)."
+        required: false
+
 permissions:
   contents: read
 
@@ -55,9 +76,29 @@ jobs:
         run: |
           set -euo pipefail
           case "${STACK}" in
-            php|node|java|go|python) echo "Stack : ${STACK}" ;;
-            *) echo "::error title=ci::stack invalide : '${STACK}' (attendu : php | node | java | go | python)"; exit 1 ;;
+            php|node|java|kotlin|go|python) echo "Stack : ${STACK}" ;;
+            *) echo "::error title=ci::stack invalide : '${STACK}' (attendu : php | node | java | kotlin | go | python)"; exit 1 ;;
           esac
+
+  lint:
+    name: lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint
+        uses: Nibiru-ci/ci-templates/actions/lint@v1
+        with:
+          stack: ${{ inputs.stack }}
+          lint-path: ${{ inputs.lint-path }}
+          runtime-version: ${{ inputs.runtime-version }}
+          lint-command: ${{ inputs.lint-command }}
+          enforce: ${{ inputs.lint-enforce }}
+          composer-auth: ${{ secrets.COMPOSER_AUTH }}
 
   secrets:
     name: secrets

@@ -1,0 +1,9 @@
+# Configuration golangci-lint par defaut - Nibiru-ci
+# Utilisee uniquement si le projet n'a pas de .golangci.yml, .golangci.yaml, .golangci.toml ou .golangci.json.
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: standard

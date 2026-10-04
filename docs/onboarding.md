@@ -19,25 +19,20 @@ git add .gitleaks-baseline.json && git commit -m "chore: baseline gitleaks"
 
 Seuls les nouveaux secrets bloqueront ensuite.
 
-## 3. Passage en bloquant
+## 3. Lint
 
-| Étape | `fail-on` | Condition |
-|---|---|---|
-| Rapport | `none` | Onboarding, mesure du bruit. |
-| Bloquant critique | `critical` | Plus aucun CRITICAL corrigeable, ou exceptions documentées. |
-| Bloquant élevé | `high` | Cible. |
+Le lint démarre en mode rapport (`lint-enforce: false`) : le check `ci / lint` reste vert, mais les contrôles en échec ou non configurés apparaissent en alerte et dans le résumé du job.
 
-Exceptions dans `.trivyignore.yaml`, avec justification, ticket et date d'expiration :
+1. Lire le résumé du premier run. Un contrôle « non configuré » indique un prérequis manquant : Pint dans `require-dev`, script `lint` dans `package.json`, plugin Spotless dans le build.
+2. Si le projet a déjà sa commande de lint, la déclarer avec `lint-command` plutôt que de changer le projet.
+3. Faire valider les règles par le lead dev de la stack, puis corriger l'existant.
+4. Passer `lint-enforce: true` quand le run est vert.
 
-```yaml
-vulnerabilities:
-  - id: CVE-2024-00000
-    statement: "Code vulnerable non atteignable - ticket SEC-123"
-    expired_at: 2027-01-31
-```
+Laravel avec dépôt privé (Nova) : ajouter `secrets: COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}` à l'appel (voir le README).
 
 ## 4. Ruleset du projet
 
 Sur la branche par défaut : pull request obligatoire, checks requis `ci / secrets`, `ci / sca-dependencies` et `ci / sca-image` si applicable, force-push interdit.
 
 Sur une organisation en plan Free, les rulesets ne s'appliquent qu'aux dépôts publics.
+

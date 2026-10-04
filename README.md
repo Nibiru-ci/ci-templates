@@ -137,3 +137,55 @@ git push --force origin v1
 ```
 
 Changement incompatible (input supprimé, job renommé, comportement par défaut modifié) : nouveau tag majeur `v2`.
+
+
+| `stack` | string | requis | `php`, `node`, `java`, `kotlin`, `go` ou `python`. |
+| `lint-enforce` | boolean | `false` | Bloque si un contrôle de lint échoue ou n'est pas configuré. `false` = rapport non bloquant. |
+| `lint-command` | string | `""` | Commande de lint du projet. Remplace entièrement les contrôles par défaut. |
+| `lint-path` | string | `.` | Répertoire du projet pour le lint (monorepo). |
+| `runtime-version` | string | `""` | Version du runtime pour le lint. Vide : node 24, java 21, go du `go.mod`, PHP du runner. |
+
+## Lint
+
+Le lint n'est pas un contrôle de sécurité : il garantit la cohérence du code. Les règles sont celles du projet quand il en a, sinon des défauts sobres. **Les règles de chaque stack doivent être validées avec les leads dev concernés** avant de passer en `lint-enforce: true`.
+
+| Stack | Contrôles par défaut | Prérequis côté projet |
+|---|---|---|
+| `php` | `php -l` sur chaque fichier, puis `composer install --no-scripts` et `vendor/bin/pint --test` | `laravel/pint` dans `require-dev` |
+| `node` | `npm ci --ignore-scripts`, `npm run lint`, `npm run format:check` si le script existe, `tsc --noEmit` si `tsconfig.json` et TypeScript installé | script `lint`, `package-lock.json` (npm uniquement) |
+| `python` | `ruff check .` et `ruff format --check .` | aucun |
+| `go` | `gofmt -l .` et `golangci-lint run ./...` | `go.mod` |
+| `java`, `kotlin` | `spotlessCheck` (Gradle) ou `spotless:check` (Maven) | plugin Spotless déclaré dans le build |
+
+**Règle de configuration :** si le projet fournit sa config (`ruff.toml`, `[tool.ruff]` dans `pyproject.toml`, `.golangci.yml`, `pint.json`, `eslint.config.js`...), c'est elle qui s'applique. Les défauts Nibiru-ci (`actions/lint/defaults/`) ne servent que sans config projet : Ruff et golangci-lint.
+
+**Un outil non configuré n'est pas un succès.** Si le prérequis manque (Pint absent, script `lint` absent, Spotless absent), le contrôle apparaît en « non configuré » : il alerte en mode rapport et fait échouer en mode bloquant.
+
+**`lint-command`** remplace tous les contrôles par défaut. Le projet gère alors lui-même l'installation de ses dépendances :
+
+```yaml
+with:
+  stack: node
+  lint-command: npm ci --ignore-scripts && npm run lint && npm run typecheck
+```
+
+C'est aussi la solution pour pnpm, yarn, checkstyle ou detekt.
+
+**Dépôts Composer privés (Laravel Nova)** : passer `COMPOSER_AUTH` en secret.
+
+```yaml
+jobs:
+  ci:
+    uses: Nibiru-ci/ci-templates/.github/workflows/ci.yml@v1
+    with:
+      stack: php
+    secrets:
+      COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+```
+
+Le secret contient `{"http-basic":{"nova.laravel.com":{"username":"...","password":"..."}}}`.
+
+**Limites connues :**
+- PHP : le runner fournit PHP 8.3 et Composer. `setup-php` n'est pas utilisé car la politique de l'organisation n'autorise que les actions GitHub. Si `runtime-version` demande une autre version, le contrôle « runtime php » passe en non configuré. L'installation utilise `--ignore-platform-reqs` : le lint n'exécute pas le code, mais une extension manquante n'est pas détectée.
+- Java et Kotlin : détection de Spotless par recherche du mot dans les fichiers de build. Non testé en self-test (pas de fixture).
+- Pour Node, seuls npm et `package-lock.json` sont gérés par défaut.
